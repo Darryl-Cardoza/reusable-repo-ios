@@ -49,17 +49,12 @@ sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 } >> "$GITHUB_PATH"
 
 # -------------------------------------------------------------
-# 5️⃣ Enforce Gradle 8.7 (avoid auto-upgrade to 9.x)
+# 5️⃣ Enforce Gradle 8.7 manually (no dependency on system Gradle)
 # -------------------------------------------------------------
-if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-  echo "⚙️ Forcing Gradle wrapper to version 8.7..."
-  sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip|' gradle/wrapper/gradle-wrapper.properties
-else
-  echo "⚙️ Creating Gradle wrapper using version 8.7..."
-  gradle wrapper --gradle-version 8.7
-fi
+GRADLE_DIR="gradle/wrapper"
+WRAPPER_JAR="$GRADLE_DIR/gradle-wrapper.jar"
+WRAPPER_PROPS="$GRADLE_DIR/gradle-wrapper.properties"
 
-chmod +x gradlew || true
-echo "✅ Gradle version pinned to 8.7."
+mkdir -p "$GRADLE_DIR"
 
-echo "✅ Android SDK installation complete and PATH exported."
+echo "⚙️ Forcin
