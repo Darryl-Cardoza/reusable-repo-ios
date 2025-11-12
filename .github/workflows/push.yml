@@ -33,6 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure Gradlew is executable
+        run: chmod +x gradlew
+
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
