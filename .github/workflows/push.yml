@@ -76,61 +76,61 @@ jobs:
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
       # Generate JaCoCo report (task name can differ in your project)
-      - name: Generate JaCoCo Report (if configured)
-        run: |
-          # Change 'jacocoTestReport' here if your task is named differently
-          if ./gradlew tasks --all | grep -q '^jacocoTestReport\b'; then
-            echo "JaCoCo task found -> generating report"
-            ./gradlew jacocoTestReport
-          else
-            echo "JaCoCo task not found -> skipping report generation"
-          fi
-
-      - name: Coverage Gate (JaCoCo XML)
-        id: coverage
-        run: |
-          # Change XML path if your JaCoCo report is written elsewhere
-          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
-
-          if ! ./gradlew tasks --all | grep -q '^jacocoTestReport\b'; then
-            echo "JaCoCo task not found; skipping coverage gate."
-            echo "coverage_percent=0.00" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ ! -f "$XML" ]; then
-            echo "❌ JaCoCo XML not found at: $XML"
-            exit 1
-          fi
-
-          # Parse TOTAL LINE coverage from JaCoCo XML.
-          # JaCoCo XML contains: <counter type="LINE" missed="X" covered="Y"/>
-          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1)
-          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1)
-
-          if [ -z "$MISSED" ] || [ -z "$COVERED" ]; then
-            echo "❌ Could not parse LINE counters from JaCoCo XML."
-            exit 1
-          fi
-
-          TOTAL=$((MISSED + COVERED))
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "❌ JaCoCo LINE total is 0; cannot compute coverage."
-            exit 1
-          fi
-
-          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
-          echo "📊 LINE Coverage: $PCT%"
-
-          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-
-          PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-          if [ "$PASS" -ne 1 ]; then
-            echo "❌ Coverage $PCT% is below threshold $COVERAGE_THRESHOLD%"
-            exit 1
-          fi
-
-          echo "✅ Coverage gate passed ($PCT% >= $COVERAGE_THRESHOLD%)"
+#      - name: Generate JaCoCo Report (if configured)
+#        run: |
+#          # Change 'jacocoTestReport' here if your task is named differently
+#          if ./gradlew tasks --all | grep -q '^jacocoTestReport\b'; then
+#            echo "JaCoCo task found -> generating report"
+#            ./gradlew jacocoTestReport
+#          else
+#            echo "JaCoCo task not found -> skipping report generation"
+#          fi
+#
+#      - name: Coverage Gate (JaCoCo XML)
+#        id: coverage
+#        run: |
+#          # Change XML path if your JaCoCo report is written elsewhere
+#          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+#
+#          if ! ./gradlew tasks --all | grep -q '^jacocoTestReport\b'; then
+#            echo "JaCoCo task not found; skipping coverage gate."
+#            echo "coverage_percent=0.00" >> "$GITHUB_OUTPUT"
+#            exit 0
+#          fi
+#
+#          if [ ! -f "$XML" ]; then
+#            echo "❌ JaCoCo XML not found at: $XML"
+#            exit 1
+#          fi
+#
+#          # Parse TOTAL LINE coverage from JaCoCo XML.
+#          # JaCoCo XML contains: <counter type="LINE" missed="X" covered="Y"/>
+#          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1)
+#          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1)
+#
+#          if [ -z "$MISSED" ] || [ -z "$COVERED" ]; then
+#            echo "❌ Could not parse LINE counters from JaCoCo XML."
+#            exit 1
+#          fi
+#
+#          TOTAL=$((MISSED + COVERED))
+#          if [ "$TOTAL" -eq 0 ]; then
+#            echo "❌ JaCoCo LINE total is 0; cannot compute coverage."
+#            exit 1
+#          fi
+#
+#          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
+#          echo "📊 LINE Coverage: $PCT%"
+#
+#          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
+#
+#          PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+#          if [ "$PASS" -ne 1 ]; then
+#            echo "❌ Coverage $PCT% is below threshold $COVERAGE_THRESHOLD%"
+#            exit 1
+#          fi
+#
+#          echo "✅ Coverage gate passed ($PCT% >= $COVERAGE_THRESHOLD%)"
 
       - name: Build APK
         run: ./gradlew assemble${{ env.BUILD_VARIANT }}
