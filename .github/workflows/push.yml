@@ -173,13 +173,13 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          
+
           XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
           SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
-          
+
           echo "## 📊 JaCoCo Coverage Report" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
-          
+
           if [ ! -f "$XML" ]; then
             echo "❌ **JaCoCo XML not found** at \`$XML\`" >> "$SUMMARY"
             echo "" >> "$SUMMARY"
@@ -188,22 +188,34 @@ jobs:
             echo "- Verify the XML path in the workflow matches your Gradle setup" >> "$SUMMARY"
             exit 0
           fi
-          
-          # TOTAL LINE coverage (first LINE counter is total in jacoco XML)
-          MISSED=$(grep -oP '<counter type="LINE" missed="\K[0-9]+' "$XML" | head -1)
-          COVERED=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="\K[0-9]+' "$XML" | head -1)
+
+          # ✅ Overall TOTAL = report-level LINE counter (LAST in the XML)
+          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1 || true)
+          MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+' || true)
+          COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+' || true)
+
+          if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
+            echo "❌ **Could not parse overall LINE counters** from JaCoCo XML." >> "$SUMMARY"
+            echo "" >> "$SUMMARY"
+            echo "Showing first few LINE counters for debugging:" >> "$SUMMARY"
+            echo '```' >> "$SUMMARY"
+            grep -n 'counter type="LINE"' "$XML" | head -10 >> "$SUMMARY" || true
+            echo '```' >> "$SUMMARY"
+            exit 0
+          fi
+
           TOTAL=$((MISSED + COVERED))
-          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
-          
+          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (t>0)?(c/t)*100:0 }')
+
           TH="${COVERAGE_THRESHOLD:-0}"
           PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-          
+
           if [ "$PASS" -eq 1 ]; then
             echo "✅ **Status:** PASSED  (Coverage **${PCT}%** ≥ Threshold **${TH}%**)" >> "$SUMMARY"
           else
             echo "❌ **Status:** FAILED  (Coverage **${PCT}%** < Threshold **${TH}%**)" >> "$SUMMARY"
           fi
-          
+
           echo "" >> "$SUMMARY"
           echo "### ✅ Overall" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
@@ -215,31 +227,34 @@ jobs:
           echo "| Line coverage | **${PCT}%** |" >> "$SUMMARY"
           echo "| Threshold | ${TH}% |" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
-          
+
           echo "### 🔎 Where coverage is missing (Top packages by missed lines)" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
           echo "| Package | Covered | Missed | Coverage |" >> "$SUMMARY"
           echo "|---|---:|---:|---:|" >> "$SUMMARY"
-          
-          # Package-level counters: <package name="..."> ... <counter type="LINE" missed="X" covered="Y"/>
-          # This parses package blocks and prints top 8 by missed lines.
+
+          # ✅ Package totals: pick the LAST <counter type="LINE"...> before </package>
           awk '
-            BEGIN { pkg=""; missed=0; covered=0; }
             /<package name="/ {
               match($0, /<package name="([^"]+)"/, a); pkg=a[1];
+              in_pkg=1; last_line="";
             }
-            /<counter type="LINE"/ && pkg != "" {
-              match($0, /missed="([0-9]+)"/, m); missed=m[1];
-              match($0, /covered="([0-9]+)"/, c); covered=c[1];
-              total=missed+covered;
-              pct=(total>0)?(covered/total*100):0;
-              printf "%s %d %d %.2f\n", pkg, covered, missed, pct;
-              pkg="";
+            in_pkg && /<counter type="LINE"/ { last_line=$0; }
+            in_pkg && /<\/package>/ {
+              if (last_line != "") {
+                match(last_line, /missed="([0-9]+)"/, m);
+                match(last_line, /covered="([0-9]+)"/, c);
+                missed=m[1]; covered=c[1];
+                total=missed+covered;
+                pct=(total>0)?(covered/total*100):0;
+                printf "%s %d %d %.2f\n", pkg, covered, missed, pct;
+              }
+              in_pkg=0;
             }
           ' "$XML" | sort -k3,3nr | head -8 | while read -r PKG COV MIS P; do
             echo "| \`$PKG\` | $COV | $MIS | ${P}% |" >> "$SUMMARY"
           done
-          
+
           echo "" >> "$SUMMARY"
           echo "### 📦 Artifacts" >> "$SUMMARY"
           echo "- Download **jacoco-reports** artifact to view the full HTML report (\`index.html\`)." >> "$SUMMARY"
