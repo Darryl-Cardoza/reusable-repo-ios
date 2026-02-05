@@ -83,7 +83,7 @@ jobs:
         run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
 
       # Generate JaCoCo report (task name can differ in your project)
-      - name: "📈 JaCoCo: Generate report"
+      - name: Generate Test Report (JaCoCo)
         run: |
           set -euo pipefail
 
@@ -115,7 +115,7 @@ jobs:
             exit 1
           fi
 
-      - name: "✅ Coverage Gate (JaCoCo XML)"
+      - name: Check Coverage Threshold
         id: coverage
         run: |
           set -euo pipefail
@@ -169,7 +169,7 @@ jobs:
 
           echo "✅ Coverage gate passed (${PCT}% >= ${COVERAGE_THRESHOLD}%)"
 
-      - name: "🧾 Coverage Summary (UI Friendly)"
+      - name: Coverage Summary Report
         if: always()
         run: |
           set -euo pipefail
@@ -177,7 +177,7 @@ jobs:
           XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
           SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
-          echo "## 📊 JaCoCo Coverage Report" >> "$SUMMARY"
+          echo "## Coverage Summary Report" >> "$SUMMARY"
           echo "" >> "$SUMMARY"
 
           if [ ! -f "$XML" ]; then
