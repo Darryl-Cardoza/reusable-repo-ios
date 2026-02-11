@@ -1,332 +1,179 @@
-name: "Android CI (Jetpack Compose) - Reusable (JaCoCo)"
+name: "iOS CI - Reusable (Xcode)"
 
 on:
   workflow_call:
     inputs:
-      java_version:
+      xcode_version:
+        required: false
+        type: string
+        default: "latest-stable"
+
+      scheme:
         required: true
         type: string
-      build_variant:
-        required: true
+
+      # Use ONE of these:
+      workspace:
+        required: false
         type: string
-        # Example values: Debug, Release, StagingDebug
+        default: ""
+      project:
+        required: false
+        type: string
+        default: ""
+
+      configuration:
+        required: false
+        type: string
+        default: "Release"
+
       coverage_threshold:
-        required: true
+        required: false
         type: string
-        # Example: "75.00"
+        default: "0"   # "0" disables coverage gate
+
+      build_archive:
+        required: false
+        type: boolean
+        default: true
+
     outputs:
       coverage_percent:
-        description: "Computed JaCoCo LINE coverage percent"
+        description: "Computed iOS line coverage percent"
         value: ${{ jobs.ci.outputs.coverage_percent }}
-
-env:
-  JAVA_VERSION: ${{ inputs.java_version }}
-  BUILD_VARIANT: ${{ inputs.build_variant }}
-  COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
 
 defaults:
   run:
     shell: bash
 
 concurrency:
-  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   ci:
-    name: Reusable CI Pipeline
-    runs-on: ubuntu-latest
+    name: Reusable iOS CI Pipeline
+    runs-on: macos-latest
     outputs:
       coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Checkout reusable repo (for init script)
-        uses: actions/checkout@v4
-        with:
-          repository: Darryl-Cardoza/reusable-repo-android
-          ref: main
-          path: .reusable
-
-      - name: Set up JDK (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/settings.gradle*', '**/gradle-wrapper.properties', '**/gradle.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
-
-      # Optional: Detekt (only if task exists)
-      - name: Static analysis (Detekt) if available
+      # Optional: choose Xcode (macos-latest already has a default)
+      - name: Select Xcode
+        if: ${{ inputs.xcode_version != 'latest-stable' }}
         run: |
-          if ./gradlew tasks --all | grep -q '^detekt\b'; then
-            echo "Detekt task found -> running detekt"
-            ./gradlew detekt
-          else
-            echo "Detekt task not found -> skipping"
-          fi
+          sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer"
+          xcodebuild -version
 
-      - name: Run Unit Tests
-        run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
+      - name: Resolve SPM (optional but helps caching)
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+            -scheme "${{ inputs.scheme }}" | xcpretty || true
 
-      # Generate JaCoCo report (task name can differ in your project)
-      - name: Generate Test Report (JaCoCo)
+      # -----------------------
+      # TEST + COVERAGE
+      # -----------------------
+      - name: Run Unit Tests (Simulator) + Coverage
         run: |
           set -euo pipefail
 
-          INIT_SCRIPT=".reusable/gradle/jacoco.init.gradle"
+          DERIVED="$RUNNER_TEMP/DerivedData"
+          RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
 
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📈 JaCoCo Report Generation"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Using init script: $INIT_SCRIPT"
+          # Choose any simulator runtime available
+          DEST="platform=iOS Simulator,name=iPhone 15"
 
-          echo "🔎 Searching for jacocoTestReport in :app tasks..."
-          if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
-            echo "✅ Found :app:jacocoTestReport"
-            echo "▶️ Running tests + report (forced, no cache)"
+          xcodebuild test \
+            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+            -scheme "${{ inputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -destination "$DEST" \
+            -derivedDataPath "$DERIVED" \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -enableCodeCoverage YES \
+            | xcpretty
 
-            ./gradlew -I "$INIT_SCRIPT" \
-              clean \
-              ":app:test${BUILD_VARIANT}UnitTest" \
-              :app:jacocoTestReport \
-              "-PcoverageVariant=${BUILD_VARIANT}" \
-              --rerun-tasks --no-build-cache
+          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
-            echo "✅ JaCoCo report generated."
-          else
-            echo "❌ :app:jacocoTestReport NOT found."
-            echo "📌 Available JaCoCo tasks:"
-            ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -i jacoco || true
-            exit 1
-          fi
-
-      - name: Check Coverage Threshold
+      - name: Compute Coverage (Line %) + Gate
         id: coverage
         run: |
           set -euo pipefail
 
-          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+          TH="${{ inputs.coverage_threshold }}"
+          RESULT="${RESULT_BUNDLE:-}"
 
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ Coverage Gate"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📄 Expected XML: $XML"
-          echo "🎯 Threshold: ${COVERAGE_THRESHOLD}%"
-          echo ""
-
-          if [ ! -f "$XML" ]; then
-            echo "❌ JaCoCo XML not found at: $XML"
-            echo "📌 Listing jacoco report folder:"
-            ls -R app/build/reports/jacoco || true
-            exit 1
-          fi
-          
-          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1)
-  
-          MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+')
-          COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
-  
-  
-          if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
-            echo "❌ Could not parse LINE counters from JaCoCo XML."
-            grep -n 'counter type="LINE"' "$XML" | head -5 || true
+          if [ -z "$RESULT" ] || [ ! -d "$RESULT" ]; then
+            echo "❌ xcresult not found."
             exit 1
           fi
 
-          TOTAL=$((MISSED + COVERED))
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "❌ LINE total is 0; cannot compute coverage."
+          # xccov output example: "Line Coverage: 78.34% (1234/1575)"
+          LINE=$(xcrun xccov view --report "$RESULT" | grep -E "Line Coverage" | head -n 1 || true)
+          if [ -z "$LINE" ]; then
+            echo "❌ Could not parse line coverage from xccov."
+            xcrun xccov view --report "$RESULT" | head -n 40 || true
             exit 1
           fi
 
-          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
-
-          echo "DEBUG: covered=$COVERED missed=$MISSED total=$TOTAL pct=$PCT"
+          PCT=$(echo "$LINE" | sed -E 's/.*Line Coverage: ([0-9]+\.[0-9]+)%.*/\1/')
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "📊 LINE Coverage: ${PCT}%"
+          echo "📊 Line Coverage: ${PCT}%"
 
-          PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-          if [ "$PASS" -ne 1 ]; then
-            echo "❌ Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
-            exit 1
+          # Threshold=0 means no gate
+          if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
+            PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+            if [ "$PASS" -ne 1 ]; then
+              echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
+              exit 1
+            fi
+            echo "✅ Coverage gate passed (${PCT}% >= ${TH}%)"
+          else
+            echo "ℹ️ Coverage gate disabled (threshold=${TH})"
           fi
 
-          echo "✅ Coverage gate passed (${PCT}% >= ${COVERAGE_THRESHOLD}%)"
-
-      - name: Coverage Summary Report
-        if: always()
+      # -----------------------
+      # ARCHIVE (unsigned)
+      # -----------------------
+      - name: Build Unsigned Archive (.xcarchive)
+        if: ${{ inputs.build_archive }}
         run: |
           set -euo pipefail
 
-          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
-          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          ARCHIVE_PATH="$RUNNER_TEMP/ios-archive-unsigned.xcarchive"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
 
-          echo "## Coverage Summary Report" >> "$SUMMARY"
-          echo "" >> "$SUMMARY"
+          xcodebuild archive \
+            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+            -scheme "${{ inputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcpretty
 
-          if [ ! -f "$XML" ]; then
-            echo "❌ **JaCoCo XML not found** at \`$XML\`" >> "$SUMMARY"
-            echo "" >> "$SUMMARY"
-            echo "### 🛠️ Troubleshooting" >> "$SUMMARY"
-            echo "- Ensure \`jacocoTestReport\` generates XML output" >> "$SUMMARY"
-            echo "- Verify the XML path in the workflow matches your Gradle setup" >> "$SUMMARY"
-            exit 0
-          fi
-
-          # ✅ Normalize XML (JaCoCo sometimes writes everything in one line)
-          NXML="$(mktemp)"
-          sed 's/></>\n</g' "$XML" > "$NXML"
-
-          # ✅ Overall TOTAL = report-level LINE counter (LAST LINE counter in file)
-          LINE_COUNTER=$(grep -E '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"' "$NXML" | tail -1 || true)
-          MISSED=$(echo "$LINE_COUNTER" | grep -oE 'missed="[0-9]+"' | grep -oE '[0-9]+' || true)
-          COVERED=$(echo "$LINE_COUNTER" | grep -oE 'covered="[0-9]+"' | grep -oE '[0-9]+' || true)
-
-          if [ -z "${MISSED:-}" ] || [ -z "${COVERED:-}" ]; then
-            echo "❌ **Could not parse overall LINE counters** from JaCoCo XML." >> "$SUMMARY"
-            echo "" >> "$SUMMARY"
-            echo "Showing first few LINE counters for debugging:" >> "$SUMMARY"
-            echo '```' >> "$SUMMARY"
-            grep -n 'counter type="LINE"' "$NXML" | head -10 >> "$SUMMARY" || true
-            echo '```' >> "$SUMMARY"
-            exit 0
-          fi
-
-          TOTAL=$((MISSED + COVERED))
-          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (t>0)?(c/t)*100:0 }')
-
-          TH="${COVERAGE_THRESHOLD:-0}"
-          PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-
-          if [ "$PASS" -eq 1 ]; then
-            echo "✅ **Status:** PASSED  (Coverage **${PCT}%** ≥ Threshold **${TH}%**)" >> "$SUMMARY"
-          else
-            echo "❌ **Status:** FAILED  (Coverage **${PCT}%** < Threshold **${TH}%**)" >> "$SUMMARY"
-          fi
-
-          echo "" >> "$SUMMARY"
-          echo "### ✅ Overall" >> "$SUMMARY"
-          echo "" >> "$SUMMARY"
-          echo "| Metric | Value |" >> "$SUMMARY"
-          echo "|---|---:|" >> "$SUMMARY"
-          echo "| Covered lines | $COVERED |" >> "$SUMMARY"
-          echo "| Missed lines | $MISSED |" >> "$SUMMARY"
-          echo "| Total lines | $TOTAL |" >> "$SUMMARY"
-          echo "| Line coverage | **${PCT}%** |" >> "$SUMMARY"
-          echo "| Threshold | ${TH}% |" >> "$SUMMARY"
-          echo "" >> "$SUMMARY"
-
-          echo "### 🔎 Where coverage is missing (Top files by missed lines)" >> "$SUMMARY"
-          echo "" >> "$SUMMARY"
-          echo "| File | Covered | Missed | Coverage |" >> "$SUMMARY"
-          echo "|---|---:|---:|---:|" >> "$SUMMARY"
-
-          # ✅ File-wise table with package/file
-          awk '
-            function flush_file() {
-              if (in_sourcefile && file != "" && missed != "" && covered != "") {
-                total = missed + covered
-                pct = (total>0) ? (covered/total*100) : 0
-                printf "%s/%s %d %d %.2f\n", pkg, file, covered, missed, pct
-              }
-            }
-
-            /<package name="/ {
-              match($0, /<package name="([^"]+)"/, a)
-              pkg = a[1]
-              next
-            }
-
-            /<sourcefile name="/ {
-              # flush previous file (if any)
-              flush_file()
-
-              match($0, /<sourcefile name="([^"]+)"/, b)
-              file = b[1]
-              missed = ""
-              covered = ""
-              in_sourcefile = 1
-              next
-            }
-
-            in_sourcefile && /<counter type="LINE"/ {
-              match($0, /missed="([0-9]+)"/, m); missed = m[1]
-              match($0, /covered="([0-9]+)"/, c); covered = c[1]
-              next
-            }
-
-            /<\/sourcefile>/ {
-              flush_file()
-              in_sourcefile = 0
-              file = ""
-              missed = ""
-              covered = ""
-              next
-            }
-
-            END {
-              flush_file()
-            }
-          ' "$NXML" \
-          | sort -k3,3nr \
-          | head -10 \
-          | while read -r FILEPATH COV MIS P; do
-              echo "| \`$FILEPATH\` | $COV | $MIS | ${P}% |" >> "$SUMMARY"
-            done
-
-      - name: Build APK
-        run: ./gradlew assemble${{ env.BUILD_VARIANT }}
-
-      # If you also build AAB in CI, uncomment:
-      - name: Build AAB
-        run: ./gradlew bundle${{ env.BUILD_VARIANT }}
-
-      - name: Upload APK/AAB outputs
+      # -----------------------
+      # ARTIFACTS
+      # -----------------------
+      - name: Upload Test Results (.xcresult)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-build-outputs-${{ env.BUILD_VARIANT }}
-          path: |
-            app/build/outputs/apk/
-            app/build/outputs/bundle/
+          name: ios-test-results
+          path: ${{ env.RESULT_BUNDLE }}
 
-      - name: Upload Test Reports
-        if: always()
+      - name: Upload Unsigned iOS Archive
+        if: ${{ inputs.build_archive }}
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports-${{ env.BUILD_VARIANT }}
-          path: |
-            app/build/reports/tests/
-            app/build/test-results/
-
-      - name: Upload JaCoCo Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-reports-${{ env.BUILD_VARIANT }}
-          path: app/build/reports/jacoco/
-
-      - name: Upload Detekt Reports (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: detekt-reports
-          path: |
-            app/build/reports/detekt/
-            build/reports/detekt/
+          name: ios-archive-unsigned
+          path: ${{ env.ARCHIVE_PATH }}

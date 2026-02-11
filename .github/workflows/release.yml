@@ -1,4 +1,4 @@
-name: "Reusable Android CD (Release)"
+name: "Reusable iOS CD (Release)"
 
 on:
   workflow_call:
@@ -7,55 +7,14 @@ on:
         required: true
         type: string
 
-      java_version:
-        required: true
-        type: string
-
-      build_variant:
-        required: true
-        type: string
-        # Example values: Debug, Release, StagingDebug (must match your CI)
-
-      coverage_threshold:
-        required: true
-        type: string
-        # Example: "75.00"
-
-      # toggles
-      deploy_to_playstore:
+      deploy_to_testflight:
         required: false
         type: boolean
-        default: false
+        default: true
 
-      playstore_track:
-        required: false
+      ios_bundle_id:
+        required: true
         type: string
-        default: internal
-
-      playstore_status:
-        required: false
-        type: string
-        default: completed
-
-      package_name:
-        required: false
-        type: string
-        default: ""
-
-      deploy_to_esper:
-        required: false
-        type: boolean
-        default: false
-
-      esper_org_id:
-        required: false
-        type: string
-        default: ""
-
-      esper_app_id:
-        required: false
-        type: string
-        default: ""
 
       enable_whats_new:
         required: false
@@ -69,33 +28,28 @@ on:
 
     secrets:
       # Signing
-      ANDROID_KEYSTORE:
-        required: false
-      KEYSTORE_PASSWORD:
-        required: false
-      KEY_PASSWORD:
-        required: false
-      KEY_ALIAS:
-        required: false
+      IOS_TEAM_ID:
+        required: true
+      IOS_CERT_P12_BASE64:
+        required: true
+      IOS_CERT_PASSWORD:
+        required: true
+      IOS_PROVISION_PROFILE_BASE64:
+        required: true
 
-      # Play Store
-      PLAYSTORE_SERVICE_ACCOUNT:
-        required: false
-
-      # Esper
-      ESPER_API_KEY:
-        required: false
-
-    outputs:
-      coverage_percent:
-        description: "Computed JaCoCo LINE coverage percent from CI"
-        value: ${{ jobs.ci.outputs.coverage_percent }}
+      # App Store Connect API
+      APPSTORE_ISSUER_ID:
+        required: true
+      APPSTORE_KEY_ID:
+        required: true
+      APPSTORE_PRIVATE_KEY:
+        required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: android-cd-${{ github.ref }}
+  group: ios-cd-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -103,19 +57,8 @@ defaults:
     shell: bash
 
 jobs:
-  # 0) CI (your reusable CI)
-  ci:
-    name: Android CI (Reusable)
-    uses: ./.github/workflows/push.yml
-    with:
-      java_version: ${{ inputs.java_version }}
-      build_variant: ${{ inputs.build_variant }}
-      coverage_threshold: ${{ inputs.coverage_threshold }}
-
-  # 1) Create GitHub Release (Flutter-like version bump logic)
   create_release:
     name: Create GitHub Release
-    needs: ci
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version_check.outputs.version }}
@@ -126,34 +69,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download unsigned Android artifacts (from CI)
-        uses: actions/download-artifact@v4
-        with:
-          name: android-build-outputs-${{ inputs.build_variant }}
-          path: release/android/unsigned
-
-      - name: Determine next GitHub version (unique tag)
+      - name: Determine next GitHub version
         id: version_check
         run: |
           set -euo pipefail
-
           BASE_VERSION="${{ inputs.version }}"
-          git fetch --tags
-          
-          # Hard fail if not semver (same expectation as Flutter CD)
+
           if ! [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "❌ inputs.version must be semver like 1.2.3"
-          echo "You passed: '$BASE_VERSION'"
-          exit 1
+            echo "❌ inputs.version must be semver like 1.2.3"
+            echo "You passed: '$BASE_VERSION'"
+            exit 1
           fi
-          
+
+          git fetch --tags
           CURRENT_VERSION="$BASE_VERSION"
+
           while git rev-parse "v$CURRENT_VERSION" >/dev/null 2>&1; do
-          IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
-          patch=$((patch + 1))
-          CURRENT_VERSION="$major.$minor.$patch"
+            IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
+            patch=$((patch + 1))
+            CURRENT_VERSION="$major.$minor.$patch"
           done
-          
+
           echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
@@ -166,240 +102,206 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2) Sign Android outputs (APK + AAB if present)
-  sign_android:
-    name: Sign Android
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
+  sign_ios:
+    name: Sign iOS & Export IPA
     needs: create_release
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
-      - name: Download unsigned Android artifacts
+      - uses: actions/checkout@v4
+
+      - name: Download unsigned iOS archive
         uses: actions/download-artifact@v4
         with:
-          name: android-build-outputs-${{ inputs.build_variant }}
-          path: release/android/unsigned
+          name: ios-archive-unsigned
+          path: release/ios
 
-      - name: Install Android SDK tools (zipalign/apksigner)
-        uses: android-actions/setup-android@v3
-
-      - name: Install Build Tools 34.0.0
-        run: |
-          set -e
-          sdkmanager "build-tools;34.0.0" "platform-tools" >/dev/null
-          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-
-      - name: Decode Keystore
+      - name: Install certificate & profile
+        env:
+          P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/android
-          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > /tmp/android/upload-keystore.jks
 
-      - name: Collect unsigned files
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PWD="temp"
+
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+          security list-keychains -d user -s "$KEYCHAIN"
+          security default-keychain -d user -s "$KEYCHAIN"
+
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcodebuild
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/profile.mobileprovision")")
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+
+          echo "✅ Installed provisioning profile UUID: $UUID"
+          security find-identity -p codesigning -v
+
+      - name: Generate ExportOptions.plist
         run: |
           set -euo pipefail
-          echo "Unsigned folder:"
-          find release/android/unsigned -maxdepth 6 -type f | sed 's/^/ - /' || true
 
-      - name: Sign APK(s) if present
+          cat > ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+
+            <key>signingStyle</key>
+            <string>manual</string>
+
+            <key>teamID</key>
+            <string>${{ secrets.IOS_TEAM_ID }}</string>
+
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${{ inputs.ios_bundle_id }}</key>
+              <string>DevOpsReleaseProfile</string>
+            </dict>
+
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Export IPA
         run: |
           set -euo pipefail
-          mkdir -p release/android/signed
 
-          mapfile -t APKS < <(find release/android/unsigned -type f -name "*.apk" || true)
-          if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "No APKs found to sign (ok)."
-            exit 0
+          ARCHIVE=$(find release/ios -type d -name "*.xcarchive" | head -n 1)
+          if [ -z "$ARCHIVE" ]; then
+            echo "❌ No .xcarchive found in release/ios"
+            find release/ios -maxdepth 6 -print || true
+            exit 1
           fi
 
-          for APK in "${APKS[@]}"; do
-            BASENAME="$(basename "$APK" .apk)"
-            OUT="release/android/signed/${BASENAME}-signed.apk"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist ExportOptions.plist
 
-            echo "Signing APK: $APK -> $OUT"
-
-            zipalign -f 4 "$APK" /tmp/aligned.apk
-
-            apksigner sign \
-              --ks /tmp/android/upload-keystore.jks \
-              --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
-              --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
-              --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
-              --out "$OUT" \
-              /tmp/aligned.apk
-
-            apksigner verify --print-certs "$OUT"
-          done
-
-      - name: Sign AAB(s) if present
-        run: |
-          set -euo pipefail
-          mkdir -p release/android/signed
-
-          mapfile -t AABS < <(find release/android/unsigned -type f -name "*.aab" || true)
-          if [ "${#AABS[@]}" -eq 0 ]; then
-            echo "No AABs found to sign (ok)."
-            exit 0
-          fi
-
-          for AAB in "${AABS[@]}"; do
-            BASENAME="$(basename "$AAB" .aab)"
-            OUT="release/android/signed/${BASENAME}-signed.aab"
-
-            echo "Signing AAB: $AAB -> $OUT"
-            cp "$AAB" "$OUT"
-
-            # AAB signing uses jarsigner
-            jarsigner -verbose \
-              -keystore /tmp/android/upload-keystore.jks \
-              -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
-              -keypass "${{ secrets.KEY_PASSWORD }}" \
-              "$OUT" \
-              "${{ secrets.KEY_ALIAS }}"
-          done
-
-      - name: Upload signed Android artifacts
+      - name: Upload signed IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-signed
-          path: release/android/signed/*
+          name: ios-ipa-signed
+          path: ${{ runner.temp }}/export/*.ipa
 
-  # 3) Deploy to Play Store (prefers AAB)
-  deploy_playstore:
-    name: Deploy to Google Play Store
-    if: ${{ inputs.deploy_to_playstore }}
-    needs: sign_android
-    runs-on: ubuntu-latest
+  deploy_testflight:
+    name: Deploy to TestFlight
+    if: ${{ inputs.deploy_to_testflight }}
+    needs: sign_ios
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download signed artifacts
+      - name: Download signed IPA
         uses: actions/download-artifact@v4
         with:
-          name: android-signed
-          path: release/android/signed
+          name: ios-ipa-signed
+          path: release/ios
 
-      - name: Prepare Play Store "What's New"
-        if: ${{ inputs.enable_whats_new }}
-        run: |
-          set -euo pipefail
-          if [ -z "${{ inputs.whats_new_file }}" ]; then
-            echo "❌ whats_new_file not provided"
-            exit 1
-          fi
-          if [ ! -f "${{ inputs.whats_new_file }}" ]; then
-            echo "❌ File not found: ${{ inputs.whats_new_file }}"
-            exit 1
-          fi
-
-          LANG="en-US"
-          mkdir -p "$RUNNER_TEMP/whatsnew/${LANG}"
-          cp "${{ inputs.whats_new_file }}" "$RUNNER_TEMP/whatsnew/${LANG}/whatsnew"
-          echo "✅ whatsNewDirectory prepared at: $RUNNER_TEMP/whatsnew"
-
-      - name: Verify signed AAB exists
-        run: |
-          set -euo pipefail
-          ls -la release/android/signed || true
-          AAB=$(find release/android/signed -name "*.aab" | head -n 1 || true)
-          if [ -z "$AAB" ]; then
-            echo "❌ No signed .aab found in release/android/signed"
-            exit 1
-          fi
-          echo "✅ Found AAB: $AAB"
-
-      - name: Upload to Google Play Store (AAB)
-        uses: r0adkll/upload-google-play@v1
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
         with:
-          serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
-          packageName: ${{ inputs.package_name }}
-          releaseFiles: release/android/signed/*.aab
-          track: ${{ inputs.playstore_track }}
-          status: ${{ inputs.playstore_status }}
-          inAppUpdatePriority: 2
-          whatsNewDirectory: ${{ inputs.enable_whats_new && format('{0}/whatsnew', runner.temp) || '' }}
+          ruby-version: "3.2"
+          bundler-cache: false
 
-  # 4) Deploy to Esper (APK)
-  deploy_esper:
-    name: Deploy to Esper
-    if: ${{ inputs.deploy_to_esper }}
-    needs: sign_android
-    runs-on: ubuntu-latest
+      - name: Install fastlane
+        run: gem install fastlane -N
 
-    steps:
-      - name: Download signed artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-signed
-          path: release/android/signed
-
-      - name: Upload to Esper
+      - name: Upload to TestFlight
         env:
-          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
-          ESPER_ORG_ID: ${{ inputs.esper_org_id }}
-          ESPER_APP_ID: ${{ inputs.esper_app_id }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          if [ -z "$ESPER_ORG_ID" ] || [ -z "$ESPER_APP_ID" ]; then
-            echo "❌ esper_org_id and esper_app_id are required"
+          IPA=$(find release/ios -name "*.ipa" | head -n 1)
+          if [ -z "$IPA" ]; then
+            echo "❌ No IPA found in release/ios"
             exit 1
           fi
 
-          APK=$(find release/android/signed -name "*.apk" | head -n 1 || true)
-          if [ -z "$APK" ]; then
-            echo "❌ No signed APK found (needed for Esper)"
-            find release/android/signed -maxdepth 4 -type f || true
-            exit 1
+          echo "$APPSTORE_PRIVATE_KEY" | base64 --decode > AuthKey.p8
+          perl -pi -e 's/\r\n/\n/g' AuthKey.p8
+
+          KEY_ESCAPED=$(python3 - <<'PY'
+          import json
+          p = open("AuthKey.p8", "r", encoding="utf-8").read()
+          print(json.dumps(p)[1:-1])
+          PY
+          )
+
+          cat > api_key.json <<EOF
+          {
+            "key_id": "${APPSTORE_KEY_ID}",
+            "issuer_id": "${APPSTORE_ISSUER_ID}",
+            "key": "${KEY_ESCAPED}",
+            "in_house": false
+          }
+          EOF
+
+          CHANGELOG=""
+          if [ "${{ inputs.enable_whats_new }}" = "true" ]; then
+            if [ -z "${{ inputs.whats_new_file }}" ] || [ ! -f "${{ inputs.whats_new_file }}" ]; then
+              echo "❌ whats_new_file missing or not found"
+              exit 1
+            fi
+            CHANGELOG="$(cat "${{ inputs.whats_new_file }}")"
           fi
 
-          echo "✅ Uploading $APK to Esper..."
+          if [ -n "$CHANGELOG" ]; then
+            fastlane pilot upload --ipa "$IPA" --api_key_path api_key.json --changelog "$CHANGELOG"
+          else
+            fastlane pilot upload --ipa "$IPA" --api_key_path api_key.json
+          fi
 
-          curl -sS -X POST "https://api.esper.io/v0/enterprise/${ESPER_ORG_ID}/apps/${ESPER_APP_ID}/versions/" \
-            -H "Authorization: Bearer ${ESPER_API_KEY}" \
-            -F "apk=@${APK}" \
-            -F "releaseNotes=Release ${{ needs.create_release.outputs.tag }} | CI coverage: ${{ needs.ci.outputs.coverage_percent }}%" \
-            -o esper_response.json
-
-          echo "Esper response:"
-          cat esper_response.json
-
-  # 5) Upload signed outputs to GitHub Release + include coverage in notes
   upload_to_release:
-    name: Upload signed artifacts to GitHub Release
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: [ ci, create_release, sign_android ]
+    name: Upload IPA to GitHub Release
+    needs: [create_release, sign_ios]
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Download signed artifacts
+      - name: Download signed IPA
         uses: actions/download-artifact@v4
         with:
-          name: android-signed
+          name: ios-ipa-signed
           path: dist
 
-      - name: Upload assets to GitHub Release
+      - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ needs.create_release.outputs.tag }}"
+          IPA=$(find dist -name "*.ipa" | head -n 1)
 
-          FILES=$(find dist -type f \( -name "*.apk" -o -name "*.aab" \) || true)
-          if [ -z "$FILES" ]; then
-            echo "❌ No .apk/.aab files found in dist to upload."
+          if [ -z "$IPA" ]; then
+            echo "❌ No IPA found to upload"
             exit 1
           fi
 
-          echo "Uploading to release $TAG:"
-          echo "$FILES"
-
-          # shellcheck disable=SC2086
-          gh release upload "$TAG" $FILES --clobber
-  
+          gh release upload "$TAG" "$IPA" --clobber --repo "$GITHUB_REPOSITORY"
