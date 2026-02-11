@@ -78,7 +78,7 @@ jobs:
       # -----------------------
       # TEST + COVERAGE
       # -----------------------
-      - name: Pick simulator (latest iOS runtime + first iPhone) and run tests
+      - name: Pick latest iOS simulator and run tests
         run: |
           set -euo pipefail
 
@@ -88,46 +88,47 @@ jobs:
           echo "🔎 Available devices:"
           xcrun simctl list devices available
 
-          # 1) Pick latest iOS runtime *identifier* (NOT the build string in parentheses)
-          # Example: com.apple.CoreSimulator.SimRuntime.iOS-26-2
-          RUNTIME_ID="$(
+          # 1️⃣ Get latest iOS runtime version (e.g. 26.2)
+          IOS_VERSION="$(
             xcrun simctl list runtimes \
-              | awk -F' - ' '/^iOS/ && !/unavailable/ {print $3}' \
+              | awk '/^iOS/ && !/unavailable/ {print $2}' \
+              | sort -V \
               | tail -n 1
           )"
 
-          if [ -z "${RUNTIME_ID:-}" ]; then
-            echo "❌ No available iOS runtime id found."
+          if [ -z "${IOS_VERSION:-}" ]; then
+            echo "❌ No iOS runtime found"
             exit 1
           fi
 
-          echo "✅ Picked runtime id: $RUNTIME_ID"
+          echo "✅ Latest iOS runtime version: $IOS_VERSION"
 
-          # 2) Pick first available iPhone UDID in that runtime
+          # 2️⃣ Extract first iPhone UDID under that runtime
           DEVICE_UDID="$(
-            xcrun simctl list devices "$RUNTIME_ID" available \
-              | awk -F '[()]' '/iPhone/ {print $2; exit}'
+            xcrun simctl list devices available \
+              | awk -v ver="$IOS_VERSION" '
+                  $0 ~ "-- iOS "ver" --" {flag=1; next}
+                  /^--/ {flag=0}
+                  flag && /iPhone/ {
+                      match($0, /\(([A-F0-9-]+)\)/, arr)
+                      print arr[1]
+                      exit
+                  }
+              '
           )"
 
           if [ -z "${DEVICE_UDID:-}" ]; then
-            echo "❌ No available iPhone device found for runtime id: $RUNTIME_ID"
-            xcrun simctl list devices "$RUNTIME_ID" available || true
+            echo "❌ No iPhone device found for iOS $IOS_VERSION"
             exit 1
           fi
 
-          # Optional: resolve name for logs
-          DEVICE_NAME="$(
-            xcrun simctl list devices "$RUNTIME_ID" available \
-              | awk -v udid="$DEVICE_UDID" -F '[()]' '$2==udid {gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1; exit}'
-          )"
+          echo "✅ Picked device UDID: $DEVICE_UDID"
 
-          echo "✅ Picked device: ${DEVICE_NAME:-unknown} ($DEVICE_UDID)"
-
-          # 3) Boot + wait
+          # 3️⃣ Boot simulator
           xcrun simctl boot "$DEVICE_UDID" || true
           xcrun simctl bootstatus "$DEVICE_UDID" -b
 
-          # 4) Run tests
+          # 4️⃣ Run tests
           xcodebuild test \
             -scheme "TestApp" \
             -destination "id=$DEVICE_UDID"
