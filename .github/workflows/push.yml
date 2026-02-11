@@ -78,18 +78,23 @@ jobs:
       # -----------------------
       # TEST + COVERAGE
       # -----------------------
+      - name: List schemes & destinations (debug)
+        run: |
+          set -euo pipefail
+          xcodebuild -list -workspace "TestApp.xcworkspace"
+          xcodebuild -showdestinations -workspace "TestApp.xcworkspace" -scheme "TestApp"
+
       - name: Run tests (iOS Simulator, no signing)
         run: |
           set -euo pipefail
 
-          DEST="id=D4B2D98E-69A4-4913-8376-718BEF6534F9"
           RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
           xcodebuild test \
             -workspace "TestApp.xcworkspace" \
             -scheme "TestApp" \
-            -destination "$DEST" \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6' \
             -resultBundlePath "$RESULT_BUNDLE" \
             -enableCodeCoverage YES \
             CODE_SIGNING_ALLOWED=NO \
