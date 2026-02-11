@@ -107,61 +107,45 @@ jobs:
         id: coverage
         run: |
           set -euo pipefail
-          
-          TH="${{ inputs.coverage_threshold }}"
+  
+          TH="75.00"
           RESULT="${RESULT_BUNDLE:-}"
           
           if [ -z "$RESULT" ] || [ ! -d "$RESULT" ]; then
-            echo "❌ xcresult not found at: $RESULT"
-            exit 1
+          echo "❌ xcresult not found at RESULT_BUNDLE=$RESULT"
+          exit 1
           fi
           
-          # Print a small preview (debug)
           echo "🔎 Coverage targets:"
-          xcrun xccov view --report --only-targets "$RESULT" | head -n 40 || true
+          xcrun xccov view --report "$RESULT"
           
-          # Try to pick YOUR app target first (exclude Pods / frameworks)
-          # Common formats: "TestApp.app 85.00% (x/y)" OR "TestApp 85.00% ..."
-          LINE="$(
-            xcrun xccov view --report --only-targets "$RESULT" \
-            | awk '
-                NR==1 {next}                                  # skip header
-                $1 ~ /(Pods|\.framework)$/ {next}             # skip Pods/frameworks
-                $1 ~ /\.xctest$/ {next}                       # skip test bundles
-                {print; exit}
-              '
-          )"
+          # Extract coverage for TestApp.app only
+          LINE=$(xcrun xccov view --report "$RESULT" | grep "TestApp.app" | head -n 1 || true)
           
           if [ -z "$LINE" ]; then
-            echo "❌ Could not find a non-pod target in xccov output."
-            echo "Dumping full targets list:"
-            xcrun xccov view --report --only-targets "$RESULT" || true
-            exit 1
+          echo "❌ Could not find TestApp.app coverage line."
+          exit 1
           fi
           
-          # Extract percent from something like: "TestApp.app 78.34% (1234/1575)"
-          PCT="$(echo "$LINE" | sed -E 's/.* ([0-9]+(\.[0-9]+)?)%.*/\1/')"
+          # Extract the XX.XX% value
+          PCT=$(echo "$LINE" | awk '{print $(NF-1)}' | tr -d '%')
           
-          if [ -z "$PCT" ] || ! echo "$PCT" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
-            echo "❌ Failed to parse coverage percent from line: $LINE"
-            exit 1
+          if [ -z "$PCT" ]; then
+         echo "❌ Failed to parse coverage percent from line: $LINE"
+          exit 1
           fi
           
           echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "📊 Line Coverage (selected target): ${PCT}%"
-          echo "📌 Selected row: $LINE"
-          
-          # Threshold=0 means no gate
-          if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
-            PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-            if [ "$PASS" -ne 1 ]; then
-              echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
-              exit 1
-            fi
-            echo "✅ Coverage gate passed (${PCT}% >= ${TH}%)"
-          else
-            echo "ℹ️ Coverage gate disabled (threshold=${TH})"
+          echo "📊 TestApp Coverage: ${PCT}%"
+        
+          PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+        
+          if [ "$PASS" -ne 1 ]; then
+          echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
+          exit 1
           fi
+
+          echo "✅ Coverage gate passed (${PCT}% >= ${TH}%)"
 
       # -----------------------
       # ARCHIVE (unsigned)
