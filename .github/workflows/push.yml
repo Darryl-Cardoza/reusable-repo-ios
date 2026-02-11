@@ -89,42 +89,41 @@ jobs:
           xcrun simctl list devices available
 
           # 1️⃣ Get latest iOS runtime version (e.g. 26.2)
+          # 1️⃣ Latest iOS version (e.g. 26.2)
           IOS_VERSION="$(
-            xcrun simctl list runtimes \
-              | awk '/^iOS/ && !/unavailable/ {print $2}' \
-              | sort -V \
-              | tail -n 1
+          xcrun simctl list runtimes \
+          | awk '/^iOS/ && !/unavailable/ {print $2}' \
+          | sort -V \
+          | tail -n 1
           )"
 
-          if [ -z "${IOS_VERSION:-}" ]; then
-            echo "❌ No iOS runtime found"
-            exit 1
-          fi
-
-          echo "✅ Latest iOS runtime version: $IOS_VERSION"
-
-          # 2️⃣ Extract first iPhone UDID under that runtime
+        echo "✅ Latest iOS runtime version: $IOS_VERSION"
+        
+        # 2️⃣ Pick first iPhone UDID under that runtime (BSD awk compatible)
           DEVICE_UDID="$(
-            xcrun simctl list devices available \
-              | awk -v ver="$IOS_VERSION" '
-                  $0 ~ "-- iOS "ver" --" {flag=1; next}
-                  /^--/ {flag=0}
-                  flag && /iPhone/ {
-                      match($0, /\(([A-F0-9-]+)\)/, arr)
-                      print arr[1]
-                      exit
-                  }
-              '
+          xcrun simctl list devices available \
+          | awk -v ver="$IOS_VERSION" '
+          $0 ~ "-- iOS "ver" --" {inblock=1; next}
+          /^--/ {inblock=0}
+          inblock && $0 ~ /iPhone/ {
+          line=$0
+          sub(/^.*\(/, "", line)   # remove up to first "("
+          sub(/\).*/, "", line)    # remove from ")" onwards
+          print line
+          exit
+          }
+          '
           )"
-
+          
           if [ -z "${DEVICE_UDID:-}" ]; then
-            echo "❌ No iPhone device found for iOS $IOS_VERSION"
-            exit 1
+          echo "❌ No iPhone device found for iOS $IOS_VERSION"
+          exit 1
           fi
 
-          echo "✅ Picked device UDID: $DEVICE_UDID"
-
-          # 3️⃣ Boot simulator
+        echo "✅ Picked iPhone UDID: $DEVICE_UDID"
+          
+          
+  # 3️⃣ Boot simulator
           xcrun simctl boot "$DEVICE_UDID" || true
           xcrun simctl bootstatus "$DEVICE_UDID" -b
 
