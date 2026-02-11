@@ -136,10 +136,21 @@ jobs:
         id: version_check
         run: |
           set -euo pipefail
-          BASE_VERSION="${{ inputs.version }}"
+
+          RAW="${{ inputs.version }}"
+
+          # Accept "v1.2.3" or "1.2.3" only
+          CLEAN="$(echo "$RAW" | sed -E 's/^v//' | tr -d '[:space:]')"
+
+          if ! [[ "$CLEAN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version input: '$RAW'"
+            echo "✅ Expected format: 1.2.3 (or v1.2.3)"
+            exit 1
+          fi
+
           git fetch --tags
 
-          CURRENT_VERSION="$BASE_VERSION"
+          CURRENT_VERSION="$CLEAN"
           while git rev-parse "v$CURRENT_VERSION" >/dev/null 2>&1; do
             IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
             patch=$((patch + 1))
