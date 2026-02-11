@@ -78,7 +78,7 @@ jobs:
       # -----------------------
       # TEST + COVERAGE
       # -----------------------
-      - name: Pick simulator + run iOS tests (robust)
+      - name: Pick simulator (latest iOS runtime + first iPhone) and run tests
         run: |
           set -euo pipefail
 
@@ -88,44 +88,49 @@ jobs:
           echo "🔎 Available devices:"
           xcrun simctl list devices available
 
-          # 1) Pick latest iOS runtime identifier (e.g. com.apple.CoreSimulator.SimRuntime.iOS-18-6)
-          RUNTIME_ID="$(xcrun simctl list runtimes \
-            | awk -F '[()]' '/iOS/ && /com.apple.CoreSimulator.SimRuntime.iOS/ && !/unavailable/ {print $2}' \
-            | tail -n 1)"
+          # 1) Pick latest iOS runtime *identifier* (NOT the build string in parentheses)
+          # Example: com.apple.CoreSimulator.SimRuntime.iOS-26-2
+          RUNTIME_ID="$(
+            xcrun simctl list runtimes \
+              | awk -F' - ' '/^iOS/ && !/unavailable/ {print $3}' \
+              | tail -n 1
+          )"
 
           if [ -z "${RUNTIME_ID:-}" ]; then
-            echo "❌ No available iOS simulator runtime found."
+            echo "❌ No available iOS runtime id found."
             exit 1
           fi
 
-          echo "✅ Picked runtime: $RUNTIME_ID"
+          echo "✅ Picked runtime id: $RUNTIME_ID"
 
-          # 2) Pick first available iPhone device UDID in that runtime
-          DEVICE_UDID="$(xcrun simctl list devices "$RUNTIME_ID" available \
-            | awk -F '[()]' '/iPhone/ {print $2}' \
-            | head -n 1)"
+          # 2) Pick first available iPhone UDID in that runtime
+          DEVICE_UDID="$(
+            xcrun simctl list devices "$RUNTIME_ID" available \
+              | awk -F '[()]' '/iPhone/ {print $2; exit}'
+          )"
 
           if [ -z "${DEVICE_UDID:-}" ]; then
-            echo "❌ No available iPhone device found for runtime $RUNTIME_ID"
+            echo "❌ No available iPhone device found for runtime id: $RUNTIME_ID"
+            xcrun simctl list devices "$RUNTIME_ID" available || true
             exit 1
           fi
 
-          # 3) Extract device name for logging
-          DEVICE_NAME="$(xcrun simctl list devices "$RUNTIME_ID" available \
-            | awk -v udid="$DEVICE_UDID" -F '[()]' '$2 ~ udid {gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1}' \
-            | head -n 1)"
+          # Optional: resolve name for logs
+          DEVICE_NAME="$(
+            xcrun simctl list devices "$RUNTIME_ID" available \
+              | awk -v udid="$DEVICE_UDID" -F '[()]' '$2==udid {gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1; exit}'
+          )"
 
-          echo "✅ Picked device: $DEVICE_NAME ($DEVICE_UDID)"
+          echo "✅ Picked device: ${DEVICE_NAME:-unknown} ($DEVICE_UDID)"
 
-          # 4) Boot + wait (safe even if already booted)
+          # 3) Boot + wait
           xcrun simctl boot "$DEVICE_UDID" || true
           xcrun simctl bootstatus "$DEVICE_UDID" -b
 
-          # 5) Run tests on that simulator
+          # 4) Run tests
           xcodebuild test \
             -scheme "TestApp" \
-            -destination "id=$DEVICE_UDID" \
-            | xcpretty || true
+            -destination "id=$DEVICE_UDID"
 
       - name: Compute Coverage (Line %) + Gate
         id: coverage
