@@ -59,7 +59,7 @@ defaults:
 jobs:
   create_release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     outputs:
       version: ${{ steps.version_check.outputs.version }}
       tag: ${{ steps.version_check.outputs.tag }}
@@ -280,7 +280,7 @@ jobs:
   upload_to_release:
     name: Upload IPA to GitHub Release
     needs: [create_release, sign_ios]
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
