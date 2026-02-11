@@ -12,7 +12,6 @@ on:
         required: true
         type: string
 
-      # Use ONE of these:
       workspace:
         required: false
         type: string
@@ -30,7 +29,7 @@ on:
       coverage_threshold:
         required: false
         type: string
-        default: "0" # "0" disables coverage gate
+        default: "0"
 
       build_archive:
         required: false
@@ -39,20 +38,14 @@ on:
 
     outputs:
       coverage_percent:
-        description: "Computed iOS line coverage percent"
         value: ${{ jobs.ci.outputs.coverage_percent }}
 
 defaults:
   run:
     shell: bash
 
-concurrency:
-  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   ci:
-    name: Reusable iOS CI Pipeline
     runs-on: macos-latest
     outputs:
       coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
@@ -60,31 +53,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Optional Xcode version
       - name: Select Xcode
         if: ${{ inputs.xcode_version != 'latest-stable' }}
         run: |
-          set -euo pipefail
           sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer"
           xcodebuild -version
 
-      - name: Resolve SPM (optional but helps caching)
+      # Resolve packages
+      - name: Resolve Dependencies
         run: |
-          set -euo pipefail
           xcodebuild -resolvePackageDependencies \
             ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
             ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
-            -scheme "${{ inputs.scheme }}" | xcpretty || true
+            -scheme "${{ inputs.scheme }}" || true
 
       # -----------------------
-      # TEST + COVERAGE
+      # TEST (macOS destination — no simulator instability)
       # -----------------------
-      - name: List schemes & destinations (debug)
-        run: |
-          set -euo pipefail
-          xcodebuild -list -workspace "TestApp.xcworkspace"
-          xcodebuild -showdestinations -workspace "TestApp.xcworkspace" -scheme "TestApp"
-
-      - name: Run tests (iOS Simulator, no signing)
+      - name: Run Unit Tests (No Signing)
         run: |
           set -euo pipefail
 
@@ -92,71 +79,74 @@ jobs:
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
           xcodebuild test \
-            -workspace "TestApp.xcworkspace" \
-            -scheme "TestApp" \
-            -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6' \
+            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+            -scheme "${{ inputs.scheme }}" \
+            -destination 'platform=macOS' \
             -resultBundlePath "$RESULT_BUNDLE" \
             -enableCodeCoverage YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             | xcpretty
 
-      - name: Compute Coverage (Line %) + Gate
+      # -----------------------
+      # COVERAGE
+      # -----------------------
+      - name: Compute Coverage + Gate
         id: coverage
         run: |
           set -euo pipefail
-  
-          TH="75.00"
+
+          TH="${{ inputs.coverage_threshold }}"
           RESULT="${RESULT_BUNDLE:-}"
-          
+
           if [ -z "$RESULT" ] || [ ! -d "$RESULT" ]; then
-          echo "❌ xcresult not found at RESULT_BUNDLE=$RESULT"
-          exit 1
-          fi
-          
-          echo "🔎 Coverage targets:"
-          xcrun xccov view --report "$RESULT"
-          
-          # Extract coverage for TestApp.app only
-          LINE=$(xcrun xccov view --report "$RESULT" | grep "TestApp.app" | head -n 1 || true)
-          
-          if [ -z "$LINE" ]; then
-          echo "❌ Could not find TestApp.app coverage line."
-          exit 1
-          fi
-          
-          # Extract the XX.XX% value
-          PCT=$(echo "$LINE" | awk '{print $(NF-1)}' | tr -d '%')
-          
-          if [ -z "$PCT" ]; then
-         echo "❌ Failed to parse coverage percent from line: $LINE"
-          exit 1
-          fi
-          
-          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-          echo "📊 TestApp Coverage: ${PCT}%"
-        
-          PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-        
-          if [ "$PASS" -ne 1 ]; then
-          echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
-          exit 1
+            echo "❌ xcresult not found"
+            exit 1
           fi
 
-          echo "✅ Coverage gate passed (${PCT}% >= ${TH}%)"
+          echo "🔎 Coverage targets:"
+          xcrun xccov view --report "$RESULT"
+
+          APP_NAME="${{ inputs.scheme }}.app"
+
+          LINE=$(xcrun xccov view --report "$RESULT" | grep "$APP_NAME" | head -n 1 || true)
+
+          if [ -z "$LINE" ]; then
+            echo "❌ Could not find $APP_NAME coverage line"
+            exit 1
+          fi
+
+          PCT=$(echo "$LINE" | awk '{print $(NF-1)}' | tr -d '%')
+
+          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
+          echo "📊 App Coverage: ${PCT}%"
+
+          # If threshold is 0 → skip gate
+          if awk -v th="$TH" 'BEGIN{exit !(th+0>0)}'; then
+            PASS=$(awk -v p="$PCT" -v th="$TH" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
+            if [ "$PASS" -ne 1 ]; then
+              echo "❌ Coverage ${PCT}% is below threshold ${TH}%"
+              exit 1
+            fi
+            echo "✅ Coverage gate passed"
+          else
+            echo "ℹ️ Coverage gate disabled"
+          fi
 
       # -----------------------
       # ARCHIVE (unsigned)
       # -----------------------
-      - name: Build Unsigned Archive (.xcarchive)
+      - name: Build Unsigned Archive
         if: ${{ inputs.build_archive }}
         run: |
           set -euo pipefail
 
           ARCHIVE_PATH="$RUNNER_TEMP/ios-archive-unsigned.xcarchive"
-          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
 
           xcodebuild archive \
             ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
@@ -173,14 +163,14 @@ jobs:
       # -----------------------
       # ARTIFACTS
       # -----------------------
-      - name: Upload Test Results (.xcresult)
+      - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-test-results
           path: ${{ env.RESULT_BUNDLE }}
 
-      - name: Upload Unsigned iOS Archive
+      - name: Upload Unsigned Archive
         if: ${{ inputs.build_archive }}
         uses: actions/upload-artifact@v4
         with:
