@@ -79,20 +79,21 @@ jobs:
           echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
           xcodebuild test \
-            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
-            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
-            -scheme "${{ inputs.scheme }}" \
-            -destination 'platform=macOS' \
-            -resultBundlePath "$RESULT_BUNDLE" \
-            -enableCodeCoverage YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            | xcpretty
+          ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+          ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+          -scheme "${{ inputs.scheme }}" \
+          -destination 'platform=iOS Simulator,name=iPhone 16' \
+          -resultBundlePath "$RESULT_BUNDLE" \
+          -enableCodeCoverage YES \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGN_IDENTITY="" \
+          DEVELOPMENT_TEAM="" \
+          PROVISIONING_PROFILE_SPECIFIER="" \
+          | xcpretty
+          
 
-      # -----------------------
+  # -----------------------
       # COVERAGE
       # -----------------------
       - name: Compute Coverage + Gate
