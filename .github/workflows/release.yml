@@ -1,25 +1,91 @@
-name: "Android CD (Release) - Reusable"
+name: "Reusable Android CD (Release)"
 
 on:
   workflow_call:
     inputs:
+      version:
+        required: true
+        type: string
+
       java_version:
         required: true
         type: string
+
       build_variant:
         required: true
         type: string
+        # Example values: Debug, Release, StagingDebug (must match your CI)
+
       coverage_threshold:
         required: true
         type: string
-      create_release:
+        # Example: "75.00"
+
+      # toggles
+      deploy_to_playstore:
         required: false
         type: boolean
-        default: true
-      artifact_name:
+        default: false
+
+      playstore_track:
+        required: false
+        type: string
+        default: internal
+
+      playstore_status:
+        required: false
+        type: string
+        default: completed
+
+      package_name:
         required: false
         type: string
         default: ""
+
+      deploy_to_esper:
+        required: false
+        type: boolean
+        default: false
+
+      esper_org_id:
+        required: false
+        type: string
+        default: ""
+
+      esper_app_id:
+        required: false
+        type: string
+        default: ""
+
+      enable_whats_new:
+        required: false
+        type: boolean
+        default: false
+
+      whats_new_file:
+        required: false
+        type: string
+        default: ""
+
+    secrets:
+      # Signing
+      ANDROID_KEYSTORE:
+        required: false
+      KEYSTORE_PASSWORD:
+        required: false
+      KEY_PASSWORD:
+        required: false
+      KEY_ALIAS:
+        required: false
+
+      # Play Store
+      PLAYSTORE_SERVICE_ACCOUNT:
+        required: false
+
+      # Esper
+      ESPER_API_KEY:
+        required: false
+
     outputs:
       coverage_percent:
         description: "Computed JaCoCo LINE coverage percent from CI"
@@ -32,68 +98,284 @@ concurrency:
   group: android-cd-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  # 0) CI (your reusable CI)
   ci:
-    name: Run CI (Reusable)
-    uses: ./.github/workflows/push.yml
+    name: Android CI (Reusable)
+    uses: ./.github/workflows/android-ci-reusable.yml
     with:
       java_version: ${{ inputs.java_version }}
       build_variant: ${{ inputs.build_variant }}
       coverage_threshold: ${{ inputs.coverage_threshold }}
 
-  release:
-    name: Create GitHub Release + Upload Artifacts
+  # 1) Create GitHub Release (Flutter-like version bump logic)
+  create_release:
+    name: Create GitHub Release
     needs: ci
     runs-on: ubuntu-latest
-    if: ${{ inputs.create_release }}
+    outputs:
+      version: ${{ steps.version_check.outputs.version }}
+      tag: ${{ steps.version_check.outputs.tag }}
 
     steps:
-      - name: Checkout (optional)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Download build artifacts
+      - name: Download unsigned Android artifacts (from CI)
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('android-build-outputs-{0}', inputs.build_variant) }}
-          path: dist
+          name: android-build-outputs-${{ inputs.build_variant }}
+          path: release/android/unsigned
 
-      - name: List downloaded files
+      - name: Determine next GitHub version (unique tag)
+        id: version_check
         run: |
-          echo "Downloaded artifact structure:"
-          ls -la dist || true
-          find dist -type f -maxdepth 6 || true
+          set -euo pipefail
+          BASE_VERSION="${{ inputs.version }}"
+          git fetch --tags
 
-      - name: Set release tag & name
-        id: relmeta
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            TAG="manual-$(date +%Y%m%d-%H%M%S)"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "name=Android Release $TAG" >> "$GITHUB_OUTPUT"
+          CURRENT_VERSION="$BASE_VERSION"
+          while git rev-parse "v$CURRENT_VERSION" >/dev/null 2>&1; do
+            IFS='.' read -r major minor patch <<<"$CURRENT_VERSION"
+            patch=$((patch + 1))
+            CURRENT_VERSION="$major.$minor.$patch"
+          done
+
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version_check.outputs.tag }}
+          name: Release ${{ steps.version_check.outputs.tag }}
+          generate_release_notes: true
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ steps.relmeta.outputs.tag }}" \
-            --title "${{ steps.relmeta.outputs.name }}" \
-            --notes "Automated release. CI coverage: ${{ needs.ci.outputs.coverage_percent }}%"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload APK/AAB files to Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+  # 2) Sign Android outputs (APK + AAB if present)
+  sign_android:
+    name: Sign Android
+    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
+    needs: create_release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download unsigned Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build-outputs-${{ inputs.build_variant }}
+          path: release/android/unsigned
+
+      - name: Install Android SDK tools (zipalign/apksigner)
+        uses: android-actions/setup-android@v3
+
+      - name: Install Build Tools 34.0.0
         run: |
+          set -e
+          sdkmanager "build-tools;34.0.0" "platform-tools" >/dev/null
+          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+
+      - name: Decode Keystore
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/android
+          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > /tmp/android/upload-keystore.jks
+
+      - name: Collect unsigned files
+        run: |
+          set -euo pipefail
+          echo "Unsigned folder:"
+          find release/android/unsigned -maxdepth 6 -type f | sed 's/^/ - /' || true
+
+      - name: Sign APK(s) if present
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+
+          mapfile -t APKS < <(find release/android/unsigned -type f -name "*.apk" || true)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "No APKs found to sign (ok)."
+            exit 0
+          fi
+
+          for APK in "${APKS[@]}"; do
+            BASENAME="$(basename "$APK" .apk)"
+            OUT="release/android/signed/${BASENAME}-signed.apk"
+
+            echo "Signing APK: $APK -> $OUT"
+
+            zipalign -f 4 "$APK" /tmp/aligned.apk
+
+            apksigner sign \
+              --ks /tmp/android/upload-keystore.jks \
+              --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+              --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
+              --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
+              --out "$OUT" \
+              /tmp/aligned.apk
+
+            apksigner verify --print-certs "$OUT"
+          done
+
+      - name: Sign AAB(s) if present
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+
+          mapfile -t AABS < <(find release/android/unsigned -type f -name "*.aab" || true)
+          if [ "${#AABS[@]}" -eq 0 ]; then
+            echo "No AABs found to sign (ok)."
+            exit 0
+          fi
+
+          for AAB in "${AABS[@]}"; do
+            BASENAME="$(basename "$AAB" .aab)"
+            OUT="release/android/signed/${BASENAME}-signed.aab"
+
+            echo "Signing AAB: $AAB -> $OUT"
+            cp "$AAB" "$OUT"
+
+            # AAB signing uses jarsigner
+            jarsigner -verbose \
+              -keystore /tmp/android/upload-keystore.jks \
+              -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+              -keypass "${{ secrets.KEY_PASSWORD }}" \
+              "$OUT" \
+              "${{ secrets.KEY_ALIAS }}"
+          done
+
+      - name: Upload signed Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/signed/*
+
+  # 3) Deploy to Play Store (prefers AAB)
+  deploy_playstore:
+    name: Deploy to Google Play Store
+    if: ${{ inputs.deploy_to_playstore }}
+    needs: sign_android
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/signed
+
+      - name: Prepare Play Store "What's New"
+        if: ${{ inputs.enable_whats_new }}
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.whats_new_file }}" ]; then
+            echo "❌ whats_new_file not provided"
+            exit 1
+          fi
+          if [ ! -f "${{ inputs.whats_new_file }}" ]; then
+            echo "❌ File not found: ${{ inputs.whats_new_file }}"
+            exit 1
+          fi
+
+          LANG="en-US"
+          mkdir -p "$RUNNER_TEMP/whatsnew/${LANG}"
+          cp "${{ inputs.whats_new_file }}" "$RUNNER_TEMP/whatsnew/${LANG}/whatsnew"
+          echo "✅ whatsNewDirectory prepared at: $RUNNER_TEMP/whatsnew"
+
+      - name: Upload to Google Play Store (AAB)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+          packageName: ${{ inputs.package_name }}
+          releaseFiles: release/android/signed/*.aab
+          track: ${{ inputs.playstore_track }}
+          status: ${{ inputs.playstore_status }}
+          inAppUpdatePriority: 2
+          whatsNewDirectory: ${{ inputs.enable_whats_new && format('{0}/whatsnew', runner.temp) || '' }}
+
+  # 4) Deploy to Esper (APK)
+  deploy_esper:
+    name: Deploy to Esper
+    if: ${{ inputs.deploy_to_esper }}
+    needs: sign_android
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/signed
+
+      - name: Upload to Esper
+        env:
+          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
+          ESPER_ORG_ID: ${{ inputs.esper_org_id }}
+          ESPER_APP_ID: ${{ inputs.esper_app_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ESPER_ORG_ID" ] || [ -z "$ESPER_APP_ID" ]; then
+            echo "❌ esper_org_id and esper_app_id are required"
+            exit 1
+          fi
+
+          APK=$(find release/android/signed -name "*.apk" | head -n 1 || true)
+          if [ -z "$APK" ]; then
+            echo "❌ No signed APK found (needed for Esper)"
+            find release/android/signed -maxdepth 4 -type f || true
+            exit 1
+          fi
+
+          echo "✅ Uploading $APK to Esper..."
+
+          curl -sS -X POST "https://api.esper.io/v0/enterprise/${ESPER_ORG_ID}/apps/${ESPER_APP_ID}/versions/" \
+            -H "Authorization: Bearer ${ESPER_API_KEY}" \
+            -F "apk=@${APK}" \
+            -F "releaseNotes=Release ${{ needs.create_release.outputs.tag }} | CI coverage: ${{ needs.ci.outputs.coverage_percent }}%" \
+            -o esper_response.json
+
+          echo "Esper response:"
+          cat esper_response.json
+
+  # 5) Upload signed outputs to GitHub Release + include coverage in notes
+  upload_to_release:
+    name: Upload signed artifacts to GitHub Release
+    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
+    needs: [ci, create_release, sign_android]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-signed
+          path: dist
+
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.create_release.outputs.tag }}"
+
           FILES=$(find dist -type f \( -name "*.apk" -o -name "*.aab" \) || true)
           if [ -z "$FILES" ]; then
             echo "❌ No .apk/.aab files found in dist to upload."
             exit 1
           fi
 
-          echo "Uploading files:"
+          echo "Uploading to release $TAG:"
           echo "$FILES"
 
           # shellcheck disable=SC2086
-          gh release upload "${{ steps.relmeta.outputs.tag }}" $FILES --clobber
+          gh release upload "$TAG" $FILES --clobber
