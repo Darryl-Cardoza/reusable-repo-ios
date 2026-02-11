@@ -97,7 +97,7 @@ jobs:
           | tail -n 1
           )"
 
-        echo "✅ Latest iOS runtime version: $IOS_VERSION"
+          echo "✅ Latest iOS runtime version: $IOS_VERSION"
         
         # 2️⃣ Pick first iPhone UDID under that runtime (BSD awk compatible)
           DEVICE_UDID="$(
@@ -120,10 +120,10 @@ jobs:
           exit 1
           fi
 
-        echo "✅ Picked iPhone UDID: $DEVICE_UDID"
+          echo "✅ Picked iPhone UDID: $DEVICE_UDID"
           
           
-  # 3️⃣ Boot simulator
+          # 3️⃣ Boot simulator
           xcrun simctl boot "$DEVICE_UDID" || true
           xcrun simctl bootstatus "$DEVICE_UDID" -b
 
