@@ -86,7 +86,7 @@ jobs:
           RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
 
           # Choose any simulator runtime available
-          DEST="platform=iOS Simulator,OS=latest"
+          DEST="platform=iOS Simulator,name=Any iOS Simulator Device"
 
           xcodebuild test \
             ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
