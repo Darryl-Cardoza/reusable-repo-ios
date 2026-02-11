@@ -78,94 +78,18 @@ jobs:
       # -----------------------
       # TEST + COVERAGE
       # -----------------------
-      - name: Pick iOS simulator and run tests
-        env:
-          SCHEME: ${{ inputs.scheme }}
-          WORKSPACE: ${{ inputs.workspace }}
-          PROJECT: ${{ inputs.project }}
+      - name: Run Unit Tests (macOS host)
         run: |
           set -euo pipefail
 
-          echo "🔎 Available runtimes:"
-          xcrun simctl list runtimes
+          RESULT_BUNDLE="$RUNNER_TEMP/TestResults.xcresult"
+          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> $GITHUB_ENV
 
-          echo "🔎 Available devices:"
-          xcrun simctl list devices available
-
-          # Get iOS runtime versions (newest first). Example values: 26.2, 26.1, 18.6, 18.5
-          mapfile -t IOS_VERSIONS < <(
-            xcrun simctl list runtimes \
-              | awk '/^iOS/ && !/unavailable/ {print $2}' \
-              | sort -V -r
-          )
-
-          if [ "${#IOS_VERSIONS[@]}" -eq 0 ]; then
-            echo "❌ No iOS runtimes found."
-            exit 1
-          fi
-
-          echo "✅ Candidate iOS runtimes: ${IOS_VERSIONS[*]}"
-
-          pick_device_for_version() {
-            local ver="$1"
-            xcrun simctl list devices available \
-              | awk -v ver="$ver" '
-                  $0 ~ "-- iOS "ver" --" {inblock=1; next}
-                  /^--/ {inblock=0}
-                  inblock && $0 ~ /iPhone/ {
-                    line=$0
-                    sub(/^.*\(/, "", line)
-                    sub(/\).*/, "", line)
-                    print line
-                    exit
-                  }
-                '
-          }
-
-          DEVICE_UDID=""
-          IOS_VERSION_USED=""
-
-          for ver in "${IOS_VERSIONS[@]}"; do
-            udid="$(pick_device_for_version "$ver" || true)"
-            if [ -n "${udid:-}" ]; then
-              DEVICE_UDID="$udid"
-              IOS_VERSION_USED="$ver"
-              break
-            fi
-          done
-
-          if [ -z "${DEVICE_UDID:-}" ]; then
-            echo "❌ No available iPhone simulator found for any iOS runtime."
-            exit 1
-          fi
-
-          echo "✅ Picked iOS runtime: $IOS_VERSION_USED"
-          echo "✅ Picked iPhone UDID: $DEVICE_UDID"
-
-          # Boot simulator (safe if already booted)
-          xcrun simctl boot "$DEVICE_UDID" || true
-          xcrun simctl bootstatus "$DEVICE_UDID" -b
-
-          # Save result bundle path so later steps can read it
-          RESULT_BUNDLE="$RUNNER_TEMP/${SCHEME}.xcresult"
-          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> "$GITHUB_ENV"
-
-          # Build xcodebuild args for workspace/project
-          XCB_ARGS=()
-          if [ -n "${WORKSPACE:-}" ]; then
-            XCB_ARGS+=(-workspace "$WORKSPACE")
-          fi
-          if [ -n "${PROJECT:-}" ]; then
-            XCB_ARGS+=(-project "$PROJECT")
-          fi
-
-          # Run tests + coverage + xcresult output
           xcodebuild test \
-            "${XCB_ARGS[@]}" \
-            -scheme "$SCHEME" \
-            -destination "id=$DEVICE_UDID" \
-            -enableCodeCoverage YES \
+            -scheme "${{ inputs.scheme }}" \
+            -destination "platform=macOS" \
             -resultBundlePath "$RESULT_BUNDLE" \
+            -enableCodeCoverage YES \
             | xcpretty
 
       - name: Compute Coverage (Line %) + Gate
