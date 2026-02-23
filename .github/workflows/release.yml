@@ -114,7 +114,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-archive-unsigned
-          path: release
+          path: .
 
       - name: Install certificate & profile
         env:

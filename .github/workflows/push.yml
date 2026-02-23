@@ -145,21 +145,23 @@ jobs:
         if: ${{ inputs.build_archive }}
         run: |
           set -euo pipefail
-
-          ARCHIVE_PATH="$RUNNER_TEMP/ios-archive-unsigned.xcarchive"
+  
+          mkdir -p release
+          
+          ARCHIVE_PATH="release/ios-archive-unsigned.xcarchive"
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> $GITHUB_ENV
-
+          
           xcodebuild archive \
-            ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
-            ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
-            -scheme "${{ inputs.scheme }}" \
-            -configuration "${{ inputs.configuration }}" \
-            -destination "generic/platform=iOS" \
-            -archivePath "$ARCHIVE_PATH" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            | xcpretty
+          ${{ inputs.workspace != '' && format('-workspace "{0}"', inputs.workspace) || '' }} \
+          ${{ inputs.project != '' && format('-project "{0}"', inputs.project) || '' }} \
+          -scheme "${{ inputs.scheme }}" \
+          -configuration "${{ inputs.configuration }}" \
+          -destination "generic/platform=iOS" \
+          -archivePath "$ARCHIVE_PATH" \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGN_IDENTITY="" \
+          | xcpretty
 
       # -----------------------
       # ARTIFACTS
@@ -172,8 +174,9 @@ jobs:
           path: ${{ env.RESULT_BUNDLE }}
 
       - name: Upload Unsigned Archive
-        if: ${{ inputs.build_archive }}
         uses: actions/upload-artifact@v4
         with:
           name: ios-archive-unsigned
           path: ${{ env.ARCHIVE_PATH }}
+          if-no-files-found: error
+          retention-days: 1
