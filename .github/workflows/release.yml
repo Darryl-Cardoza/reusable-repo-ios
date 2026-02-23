@@ -114,7 +114,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-archive-unsigned
-          path: release/ios
+          path: release
 
       - name: Install certificate & profile
         env:
@@ -187,11 +187,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          ARCHIVE=$(find release/ios -type d -name "*.xcarchive" | head -n 1)
-          if [ -z "$ARCHIVE" ]; then
-            echo "❌ No .xcarchive found in release/ios"
-            find release/ios -maxdepth 6 -print || true
-            exit 1
+          ARCHIVE="release/ios-archive-unsigned.xcarchive"
+          if [ ! -d "$ARCHIVE" ]; then
+          echo "❌ Archive not found at $ARCHIVE"
+          ls -R release || true
+          exit 1
           fi
 
           xcodebuild -exportArchive \
