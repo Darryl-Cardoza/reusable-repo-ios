@@ -177,6 +177,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ios-archive-unsigned
-          path: ${{ env.ARCHIVE_PATH }}
-          if-no-files-found: error
-          retention-days: 1
+          path: release/ios-archive-unsigned.xcarchive
+          include-hidden-files: true
