@@ -116,6 +116,13 @@ jobs:
           name: ios-archive-unsigned
           path: archive
 
+      - name: Debug Archive Structure
+        run: |
+          echo "PWD:"
+          pwd
+          echo "Archive contents:"
+          ls -R archive
+
       - name: Install certificate & profile
         env:
           P12_BASE64: ${{ secrets.IOS_CERT_P12_BASE64 }}
